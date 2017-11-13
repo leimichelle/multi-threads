@@ -11,13 +11,13 @@
 
 name_t myname = {
      /* team name to be displayed on webpage */
-     "TeamBart",
+     "This Isnt Even My Final Form",
      /* Full name of first team member */
-     "Bartholomew JoJo Simpson",
+     "Haoen Huang",
      /* Email address of first team member */
-     "BartSimpson@mail.utoronto.ca",
+     "haoen.huang@mail.utoronto.ca",
      /* Student Number of first team member */
-     "998111111"
+     "1000738570"
      /* Full name of second team member */
      "",
      /* Email address of second team member */
