@@ -20,6 +20,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <strings.h>
+#include <string.h>
 #include <unistd.h>
 #include <assert.h>
 #include <pthread.h>
@@ -43,6 +44,8 @@ name_t myname = {
  * Basic Constants and Macros
  * You are not required to use these macros but may find them helpful.
 *************************************************************************/
+typedef long uintptr_t;
+
 #define WSIZE       sizeof(void *)            /* word size (bytes) */
 #define DSIZE       (2 * WSIZE)            /* doubleword size (bytes) */
 #define CHUNKSIZE   (1 << 6)      /* initial heap size (bytes) */
@@ -53,10 +56,10 @@ name_t myname = {
 #define PACK(size, alloc) ((size) | (alloc))
 
 /* Read and write a word at address p */
-#define GET(p)          (*(char *)(p))
-#define GET_PTR(p)      (*(char **)(p))
-#define PUT(p,val)      (*(char *)(p) = (val))
-#define PUT_PTR(p,ptr)  (*(char **)(p) = (ptr))
+#define GET(p)          (*(uintptr_t *)(p))
+#define GET_PTR(p)      (*(uintptr_t **)(p))
+#define PUT(p,val)      (*(uintptr_t *)(p) = (val))
+#define PUT_PTR(p,ptr)  (*(uintptr_t **)(p) = (ptr))
 
 /* Read the size and allocated fields from address p */
 #define GET_SIZE(p)     (GET(p) & ~(DSIZE - 1))
@@ -76,18 +79,14 @@ name_t myname = {
 
 #define DEBUG 0
 
-typedef long uintptr_t;
-
 /* Forward Declare mm_check since it was not done in header */
 int mm_check();
 
-const int kListSizes[22] = { 16, 32, 48, 64, 96, 128, 144, 160, 256, 512,
+const int kListSizes[24] = { 16, 32, 48, 64, 96, 128, 144, 160, 256, 512,
                              1024, 2048, 4096, 8192, 1 << 14, 1 << 15, 1 << 16,
-                             1 << 17, 1 << 18, 1 << 20, 1 << 22, 1 << 30 };
+                             1 << 17, 1 << 18, 1 << 20, 1 << 22, 1 << 31 };
 
 const int kLength = sizeof(kListSizes) / sizeof(kListSizes[0]);
-
-pthread_mutex_t malloc_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /**********************************************************
  * print_segregated_list
@@ -96,7 +95,7 @@ pthread_mutex_t malloc_lock = PTHREAD_MUTEX_INITIALIZER;
  **********************************************************/
 void print_segregated_list(void) {
     for (int i = 0; i < kLength; ++i) {
-        char* cur = GET_PTR((uintptr_t*)dseg_lo + i);
+        uintptr_t* cur = GET_PTR((uintptr_t*)dseg_lo + i);
         printf("%d: ->", kListSizes[i]);
         while (cur != NULL) {
             // Print out the size, pointer to prev, current address, and next
@@ -130,7 +129,7 @@ int get_appropriate_list(size_t asize) {
  **********************************************************/
 void* get_possible_list(size_t asize) {
     int i;
-    char* cur = NULL;
+    uintptr_t* cur = NULL;
     for (i = 0; i < kLength; ++i) {
         if (kListSizes[i] >= asize && GET_PTR((uintptr_t*)dseg_lo + i) != NULL) {
             cur = GET_PTR((uintptr_t*)dseg_lo + i);
@@ -156,7 +155,7 @@ void* get_possible_list(size_t asize) {
 void add_to_list(void* p) {
     int list_number = get_appropriate_list(GET_SIZE(HDRP(p)));
     /* Check to see if the linked-list is empty (head is null) */
-    char* head = GET_PTR((uintptr_t*)dseg_lo + list_number);
+    uintptr_t* head = GET_PTR((uintptr_t*)dseg_lo + list_number);
     if (head != NULL) {
         /* Set the next node to have its previous point here */
         PUT_PTR(GET_PREV(head), p);
@@ -198,9 +197,6 @@ void free_from_list(void* p) {
  **********************************************************/
 int mm_init(void)
 {
-	pthread_mutex_lock(&malloc_lock);
-	printf("mm_init\n");
-	fflush(stdout);
 	if (dseg_lo == NULL && dseg_hi == NULL) {
 		printf("mem_init\n");
 		fflush(stdout);
@@ -209,13 +205,11 @@ int mm_init(void)
         int allocate_size = WSIZE * kLength;
 	    void* heap_listp = NULL;
         if ((heap_listp = mem_sbrk(4 * WSIZE + allocate_size + DSIZE)) == (void *)-1) {
-
-		    pthread_mutex_unlock(&malloc_lock);
             return -1;
 	    }
  
         for (int i = 0; i < kLength + 1; ++i) {
-            PUT_PTR((char*)heap_listp + i, NULL);    // Set the initial values to NULL
+            PUT_PTR((uintptr_t*)heap_listp + i, NULL);    // Set the initial values to NULL
         }
         heap_listp += allocate_size;
         PUT(heap_listp + (0 * WSIZE ), 0);
@@ -224,7 +218,6 @@ int mm_init(void)
         PUT(heap_listp + (3 * WSIZE + DSIZE), PACK(0, 1));    // epilogue header
         heap_listp += DSIZE + DSIZE;
 	}
-	pthread_mutex_unlock(&malloc_lock);
     return 0;
 }
 
@@ -243,11 +236,13 @@ void *coalesce(void *bp)
     size_t size = GET_SIZE(HDRP(bp));
 
     if (prev_alloc && next_alloc) {       /* Case 1 */
+        printf("Case 1\n"); fflush(stdout);
         add_to_list(bp);
         return bp;
     }
 
     else if (prev_alloc && !next_alloc) { /* Case 2 */
+        printf("Case 2\n"); fflush(stdout);
         int next_size = GET_SIZE(HDRP(NEXT_BLKP(bp)));
         /* Remove the next block from the appropriate ll */
         free_from_list(NEXT_BLKP(bp));
@@ -261,6 +256,7 @@ void *coalesce(void *bp)
     }
 
     else if (!prev_alloc && next_alloc) { /* Case 3 */
+        printf("Case 3\n"); fflush(stdout);
         int prev_size = GET_SIZE(HDRP(PREV_BLKP(bp)));
         /* Remove the previous block from the appropriate ll */
         free_from_list(PREV_BLKP(bp));
@@ -274,6 +270,7 @@ void *coalesce(void *bp)
     }
 
     else {            /* Case 4 */
+        printf("Case 4\n"); fflush(stdout);
         /* Remove next and prev block from their appropriate ll */
         int next_size = GET_SIZE(FTRP(NEXT_BLKP(bp)));
         int prev_size = GET_SIZE(HDRP(PREV_BLKP(bp)));
@@ -303,7 +300,7 @@ void *extend_heap(size_t words)
     /* Allocate an even number of words to maintain alignments */
     size = (words % 2) ? (words+1) * WSIZE : words * WSIZE;
 
-	void* last_blk_ft = (uintptr_t*)dseg_hi + 1 - DSIZE;
+	void* last_blk_ft = dseg_hi + 1 - DSIZE;
 	void* last_blk_hd = last_blk_ft - GET_SIZE(last_blk_ft) + WSIZE;
     if (!GET_ALLOC(last_blk_hd)) {
       if (size <= GET_SIZE(last_blk_hd)) {
@@ -396,19 +393,27 @@ void* find_fit(size_t asize)
  * mm_free
  * Free the block and coalesce with neighbouring blocks
  **********************************************************/
-void mm_free(void *bp)
+void mm_free_helper(void *bp)
 {
     if (bp == NULL){
       return;
     }
-	pthread_mutex_lock(&malloc_lock);
-	printf("mm_free\n"); print_segregated_list(); mm_check(); 
+	printf("mm_free\n"); printf("is free: %d\n", GET_ALLOC(HDRP(bp))); //print_segregated_list(); 
 	fflush(stdout);
     size_t size = GET_SIZE(HDRP(bp));
     PUT(HDRP(bp), PACK(size,0));
     PUT(FTRP(bp), PACK(size,0));
+    printf("About to coalesce\n"); fflush(stdout);
     coalesce(bp);
-	pthread_mutex_unlock(&malloc_lock);
+    printf("Returned from free\n"); fflush(stdout);
+}
+
+pthread_mutex_t malloc_lock = PTHREAD_MUTEX_INITIALIZER;
+
+void mm_free(void *bp) {
+    pthread_mutex_lock(&malloc_lock);
+    mm_free_helper(bp);
+    pthread_mutex_unlock(&malloc_lock);
 }
 
 /*********************************************************
@@ -436,7 +441,7 @@ size_t get_adjusted_size(size_t size) {
  **********************************************************/
 void *mm_malloc_helper(size_t size)
 {
-	printf("mm_malloc\n"); print_segregated_list(); mm_check();
+	printf("mm_malloc\n"); print_segregated_list(); 
 	fflush(stdout);
     if (DEBUG) {
         mm_check();
@@ -578,6 +583,11 @@ int check_implicitly(void) {
     }
     if (bp - DSIZE != dseg_hi + 1) {
         printf("Error: Linear traversal of blocks ended before the end of heap\n"); fflush(stdout);
+        printf("Will trace: ");
+        void* bp = (uintptr_t*)dseg_lo + WSIZE * kLength + DSIZE + DSIZE;
+        for (; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)) {
+            printf("(%d), size(%d)->", GET_ALLOC(HDRP(bp)), GET_SIZE(HDRP(bp)));
+        }
         return 0;
     }
     return 1;
@@ -595,7 +605,7 @@ int check_explicitly(){
     int prev = 0;
     size_t size;
     for (i = 0; i < kLength; ++i) {
-        char* cur = GET_PTR((uintptr_t*)dseg_lo + i);
+        uintptr_t* cur = GET_PTR((uintptr_t*)dseg_lo + i);
         while(cur != NULL) {
             if (GET_ALLOC(HDRP(cur))) {
                 printf("Error: Block %p is allocated but found in the SLL.\n",
