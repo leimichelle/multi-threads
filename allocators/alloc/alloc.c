@@ -15,11 +15,9 @@
  *
  */
 
-
 #include <sys/types.h>
 #include <stdlib.h>
 #include <stdio.h>
-#include <strings.h>
 #include <string.h>
 #include <unistd.h>
 #include <assert.h>
@@ -198,8 +196,6 @@ void free_from_list(void* p) {
 int mm_init(void)
 {
 	if (dseg_lo == NULL && dseg_hi == NULL) {
-		printf("mem_init\n");
-		fflush(stdout);
 		mem_init();
         // We need to allocate room for kLength pointers
         int allocate_size = WSIZE * kLength;
@@ -236,13 +232,11 @@ void *coalesce(void *bp)
     size_t size = GET_SIZE(HDRP(bp));
 
     if (prev_alloc && next_alloc) {       /* Case 1 */
-        printf("Case 1\n"); fflush(stdout);
         add_to_list(bp);
         return bp;
     }
 
     else if (prev_alloc && !next_alloc) { /* Case 2 */
-        printf("Case 2\n"); fflush(stdout);
         int next_size = GET_SIZE(HDRP(NEXT_BLKP(bp)));
         /* Remove the next block from the appropriate ll */
         free_from_list(NEXT_BLKP(bp));
@@ -256,7 +250,6 @@ void *coalesce(void *bp)
     }
 
     else if (!prev_alloc && next_alloc) { /* Case 3 */
-        printf("Case 3\n"); fflush(stdout);
         int prev_size = GET_SIZE(HDRP(PREV_BLKP(bp)));
         /* Remove the previous block from the appropriate ll */
         free_from_list(PREV_BLKP(bp));
@@ -270,7 +263,6 @@ void *coalesce(void *bp)
     }
 
     else {            /* Case 4 */
-        printf("Case 4\n"); fflush(stdout);
         /* Remove next and prev block from their appropriate ll */
         int next_size = GET_SIZE(FTRP(NEXT_BLKP(bp)));
         int prev_size = GET_SIZE(HDRP(PREV_BLKP(bp)));
@@ -398,14 +390,10 @@ void mm_free_helper(void *bp)
     if (bp == NULL){
       return;
     }
-	printf("mm_free\n"); printf("is free: %d\n", GET_ALLOC(HDRP(bp))); //print_segregated_list(); 
-	fflush(stdout);
     size_t size = GET_SIZE(HDRP(bp));
     PUT(HDRP(bp), PACK(size,0));
     PUT(FTRP(bp), PACK(size,0));
-    printf("About to coalesce\n"); fflush(stdout);
     coalesce(bp);
-    printf("Returned from free\n"); fflush(stdout);
 }
 
 pthread_mutex_t malloc_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -441,8 +429,6 @@ size_t get_adjusted_size(size_t size) {
  **********************************************************/
 void *mm_malloc_helper(size_t size)
 {
-	printf("mm_malloc\n"); print_segregated_list(); 
-	fflush(stdout);
     if (DEBUG) {
         mm_check();
     } 
@@ -477,86 +463,6 @@ void* mm_malloc(size_t size) {
     void* ret = mm_malloc_helper(size);
     pthread_mutex_unlock(&malloc_lock);
     return ret;
-}
-
-/**********************************************************
- * mm_realloc
- * Implemented simply in terms of mm_malloc and mm_free
- *********************************************************/
-void *mm_realloc(void *ptr, size_t size)
-{
-    /* If size == 0 then this is just free, and we return NULL. */
-    if (size == 0){
-        mm_free(ptr);
-        return NULL;
-    }
-    /* If ptr is NULL, then this is just malloc. */
-    if (ptr == NULL) {
-        return (mm_malloc(size));
-    }
-    void *newptr;
-    size_t cur_size;
-    size_t asize;
-
-    cur_size = GET_SIZE(HDRP(ptr));
-    asize = get_adjusted_size(size);  
-
-	/* If the desired size is less than the current size, then simply return.
-	   For a general implementation of malloc, it might make sense to divide the
-	   resulting block up. For the testcases here however, it reduces utilization. */
-    if (asize < cur_size) {
-        return ptr;
-    }
-    /* Check to see if there is room (free block) in front of the block */
-    size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(ptr)));
-    size_t next_size = GET_SIZE(HDRP(NEXT_BLKP(ptr)));
-    if (!next_alloc) {
-        void* next_block = NEXT_BLKP(ptr); 
-        if (cur_size + next_size >= asize) {
-            /* Use the room since it is sufficient */
-            free_from_list(next_block);
-            PUT(HDRP(ptr), PACK(cur_size + next_size, 1));
-            PUT(FTRP(ptr), PACK(cur_size + next_size, 1));
-            return ptr; 
-        }
-    }
-
-    /* If the given block that you want to extend is at the end of the heap,
-       then extend the heap by the minimal amount */
-    void* last_blk_ft = (uintptr_t*)dseg_hi + 1 - DSIZE;
-    void* last_blk_hd = last_blk_ft - GET_SIZE(last_blk_ft) + WSIZE;
-
-    if (HDRP(ptr) == last_blk_hd) {
-        /* Only extend heap by the subtracted amount */
-        size_t extendsize = asize - GET_SIZE(last_blk_hd); 
-        if ((newptr = mem_sbrk(extendsize)) == (void *)-1)
-            return NULL;
-
-        /* Jump over pointers */
-        newptr += DSIZE;
-
-        /* Initialize free block header/footer and the epilogue header */
-        PUT(HDRP(newptr), PACK(extendsize, 0));         // free block header
-        PUT(FTRP(newptr), PACK(extendsize, 0));         // free block footer
-        PUT(HDRP(NEXT_BLKP(newptr)), PACK(0, 1));       // new epilogue header
-        PUT(HDRP(ptr), PACK(asize, 1));
-        PUT(FTRP(ptr), PACK(GET_SIZE(last_blk_hd), 1));
-        return ptr;
-    }
-
-    /* Find a new block for fit and copy over data */
-    newptr = mm_malloc(size);
-    if (newptr == NULL)
-      return NULL;
-
-    /* Copy the old data. */
-    cur_size = GET_SIZE(HDRP(ptr));
-    if (size < cur_size)
-        cur_size = size;
-
-    memcpy(newptr, ptr, cur_size);
-    mm_free(ptr);
-    return newptr;
 }
 
 /**********************************************************
