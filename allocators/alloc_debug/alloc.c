@@ -76,12 +76,14 @@ name_t myname = {
 
 #define DEBUG 0
 
+typedef long uintptr_t;
+
 /* Forward Declare mm_check since it was not done in header */
 int mm_check();
 
-const int kListSizes[24] = { 16, 32, 48, 64, 96, 128, 144, 160, 256, 512,
+const int kListSizes[22] = { 16, 32, 48, 64, 96, 128, 144, 160, 256, 512,
                              1024, 2048, 4096, 8192, 1 << 14, 1 << 15, 1 << 16,
-                             1 << 17, 1 << 18, 1 << 20, 1 << 22, 1 << 31 };
+                             1 << 17, 1 << 18, 1 << 20, 1 << 22, 1 << 30 };
 
 const int kLength = sizeof(kListSizes) / sizeof(kListSizes[0]);
 
@@ -94,7 +96,7 @@ pthread_mutex_t malloc_lock = PTHREAD_MUTEX_INITIALIZER;
  **********************************************************/
 void print_segregated_list(void) {
     for (int i = 0; i < kLength; ++i) {
-        char* cur = GET_PTR(dseg_lo + i);
+        char* cur = GET_PTR((uintptr_t*)dseg_lo + i);
         printf("%d: ->", kListSizes[i]);
         while (cur != NULL) {
             // Print out the size, pointer to prev, current address, and next
@@ -130,8 +132,8 @@ void* get_possible_list(size_t asize) {
     int i;
     char* cur = NULL;
     for (i = 0; i < kLength; ++i) {
-        if (kListSizes[i] >= asize && GET_PTR(dseg_lo + i) != NULL) {
-            cur = GET_PTR(dseg_lo + i);
+        if (kListSizes[i] >= asize && GET_PTR((uintptr_t*)dseg_lo + i) != NULL) {
+            cur = GET_PTR((uintptr_t*)dseg_lo + i);
             if (GET_SIZE(HDRP(cur)) >= asize)
                 return (void *)cur;
             else
@@ -139,8 +141,8 @@ void* get_possible_list(size_t asize) {
         }
     }
     for (i = 0; i < kLength; ++i) {
-        if (kListSizes[i] >= (asize << 1) && GET_PTR(dseg_lo + i) != NULL) {
-            cur = GET_PTR(dseg_lo + i); 
+        if (kListSizes[i] >= (asize << 1) && GET_PTR((uintptr_t*)dseg_lo + i) != NULL) {
+            cur = GET_PTR((uintptr_t*)dseg_lo + i); 
             return (void *)cur;
         }
     }
@@ -154,17 +156,17 @@ void* get_possible_list(size_t asize) {
 void add_to_list(void* p) {
     int list_number = get_appropriate_list(GET_SIZE(HDRP(p)));
     /* Check to see if the linked-list is empty (head is null) */
-    char* head = GET_PTR(dseg_lo + list_number);
+    char* head = GET_PTR((uintptr_t*)dseg_lo + list_number);
     if (head != NULL) {
         /* Set the next node to have its previous point here */
         PUT_PTR(GET_PREV(head), p);
     } 
     /* Point to the previous head of list */
-    PUT_PTR(GET_NEXT(p), GET_PTR(dseg_lo + list_number));
+    PUT_PTR(GET_NEXT(p), GET_PTR((uintptr_t*)dseg_lo + list_number));
     PUT_PTR(GET_PREV(p), NULL);
 
     /* Update head of list */
-    PUT_PTR(dseg_lo + list_number, p);
+    PUT_PTR((uintptr_t*)dseg_lo + list_number, p);
 }
 
 /**********************************************************
@@ -174,8 +176,8 @@ void add_to_list(void* p) {
 void free_from_list(void* p) { 
     int list_number = get_appropriate_list(GET_SIZE(HDRP(p)));
     /* If it is at the head, we must change the head */
-    if (GET_PTR(dseg_lo + list_number) == p) {
-        PUT_PTR(dseg_lo + list_number, GET_PTR(GET_NEXT(p)));
+    if (GET_PTR((uintptr_t*)dseg_lo + list_number) == p) {
+        PUT_PTR((uintptr_t*)dseg_lo + list_number, GET_PTR(GET_NEXT(p)));
         if (GET_PTR(GET_NEXT(p)) != NULL) {
             PUT_PTR(GET_PREV(GET_PTR(GET_NEXT(p))), NULL); 
         }
@@ -196,34 +198,34 @@ void free_from_list(void* p) {
  **********************************************************/
 int mm_init(void)
 {
-	printf("hi\n");
-	fflush(stdout);	
 	pthread_mutex_lock(&malloc_lock);
-    // We need to allocate room for kLength pointers
-    int allocate_size = WSIZE * kLength;
-	void* heap_listp = NULL;
-    /*if ((heap_listp = mem_sbrk(4 * WSIZE + allocate_size + DSIZE)) == (void *)-1)
-        return -1;*/
-    if (mem_init()) {
-		printf("mem_init failed\n");
-		pthread_mutex_unlock(&malloc_lock);
-		return -1;
-	}
-	else {
-		heap_listp = dseg_lo;
-	}
+	printf("mm_init\n");
+	fflush(stdout);
+	if (dseg_lo == NULL && dseg_hi == NULL) {
+		printf("mem_init\n");
+		fflush(stdout);
+		mem_init();
+        // We need to allocate room for kLength pointers
+        int allocate_size = WSIZE * kLength;
+	    void* heap_listp = NULL;
+        if ((heap_listp = mem_sbrk(4 * WSIZE + allocate_size + DSIZE)) == (void *)-1) {
+
+		    pthread_mutex_unlock(&malloc_lock);
+            return -1;
+	    }
  
-    for (int i = 0; i < kLength + 1; ++i) {
-        PUT_PTR((char*)heap_listp + i, NULL);    // Set the initial values to NULL
-    }
-    heap_listp += allocate_size;
-    PUT(heap_listp + (0 * WSIZE ), 0);
-    PUT(heap_listp + (1 * WSIZE ), PACK(DSIZE * 2, 1));   // prologue header
-    PUT(heap_listp + (2 * WSIZE + DSIZE), PACK(DSIZE * 2, 1));   // prologue footer
-    PUT(heap_listp + (3 * WSIZE + DSIZE), PACK(0, 1));    // epilogue header
-    heap_listp += DSIZE + DSIZE;
-    return 0;
+        for (int i = 0; i < kLength + 1; ++i) {
+            PUT_PTR((char*)heap_listp + i, NULL);    // Set the initial values to NULL
+        }
+        heap_listp += allocate_size;
+        PUT(heap_listp + (0 * WSIZE ), 0);
+        PUT(heap_listp + (1 * WSIZE ), PACK(DSIZE * 2, 1));   // prologue header
+        PUT(heap_listp + (2 * WSIZE + DSIZE), PACK(DSIZE * 2, 1));   // prologue footer
+        PUT(heap_listp + (3 * WSIZE + DSIZE), PACK(0, 1));    // epilogue header
+        heap_listp += DSIZE + DSIZE;
+	}
 	pthread_mutex_unlock(&malloc_lock);
+    return 0;
 }
 
 /**********************************************************
@@ -301,7 +303,7 @@ void *extend_heap(size_t words)
     /* Allocate an even number of words to maintain alignments */
     size = (words % 2) ? (words+1) * WSIZE : words * WSIZE;
 
-	void* last_blk_ft = dseg_hi + 1 - DSIZE;
+	void* last_blk_ft = (uintptr_t*)dseg_hi + 1 - DSIZE;
 	void* last_blk_hd = last_blk_ft - GET_SIZE(last_blk_ft) + WSIZE;
     if (!GET_ALLOC(last_blk_hd)) {
       if (size <= GET_SIZE(last_blk_hd)) {
@@ -396,12 +398,12 @@ void* find_fit(size_t asize)
  **********************************************************/
 void mm_free(void *bp)
 {
-	printf("mm_free\n");
-	fflush(stdout);	
     if (bp == NULL){
       return;
     }
 	pthread_mutex_lock(&malloc_lock);
+	printf("mm_free\n"); 
+	fflush(stdout);
     size_t size = GET_SIZE(HDRP(bp));
     PUT(HDRP(bp), PACK(size,0));
     PUT(FTRP(bp), PACK(size,0));
@@ -434,9 +436,9 @@ size_t get_adjusted_size(size_t size) {
  **********************************************************/
 void *mm_malloc(size_t size)
 {
-	printf("mm_malloc\n");
-	fflush(stdout);	
 	pthread_mutex_lock(&malloc_lock);
+	printf("mm_malloc\n"); 
+	fflush(stdout);
     if (DEBUG) {
         mm_check();
     } 
@@ -445,20 +447,24 @@ void *mm_malloc(size_t size)
     char * bp;
 
     /* Ignore spurious requests */
-    if (size == 0)
+    if (size == 0) {
+		pthread_mutex_unlock(&malloc_lock);
         return NULL;
-
+    }
     asize = get_adjusted_size(size);
 
     /* Search the free list for a fit */
     if ((bp = find_fit(asize)) != NULL) { 
-        return bp;
+		pthread_mutex_unlock(&malloc_lock);
+		return bp;
     }
 
     /* No fit found. Get more memory and place the block */
     extendsize = MAX(asize, CHUNKSIZE);
-    if ((bp = extend_heap(extendsize/WSIZE)) == NULL)
+    if ((bp = extend_heap(extendsize/WSIZE)) == NULL) {
+		pthread_mutex_unlock(&malloc_lock);
         return NULL;
+	}
 
     place(bp, asize);
 	pthread_mutex_unlock(&malloc_lock);
@@ -510,7 +516,7 @@ void *mm_realloc(void *ptr, size_t size)
 
     /* If the given block that you want to extend is at the end of the heap,
        then extend the heap by the minimal amount */
-    void* last_blk_ft = dseg_hi + 1 - DSIZE;
+    void* last_blk_ft = (uintptr_t*)dseg_hi + 1 - DSIZE;
     void* last_blk_hd = last_blk_ft - GET_SIZE(last_blk_ft) + WSIZE;
 
     if (HDRP(ptr) == last_blk_hd) {
@@ -556,7 +562,7 @@ void *mm_realloc(void *ptr, size_t size)
  *    mem_heap_lo() and mem_heap_hi()
  **********************************************************/
 int check_implicitly(void) {
-    void* bp = dseg_lo + WSIZE * kLength + DSIZE + DSIZE;
+    void* bp = (uintptr_t*)dseg_lo + WSIZE * kLength + DSIZE + DSIZE;
     for (; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)) {
         void* next = GET_PTR(GET_NEXT(bp));
         void* prev = GET_PTR(GET_PREV(bp));
