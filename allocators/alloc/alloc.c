@@ -47,11 +47,13 @@ typedef long uintptr_t;
 #define WSIZE       sizeof(void *)            /* word size (bytes) */
 #define DSIZE       (2 * WSIZE)            /* doubleword size (bytes) */
 #define CHUNKSIZE   (1 << 6)      /* initial heap size (bytes) */
+#define NUM_ARENA 8
+#define PAGE_SIZE 1<<20
 
 #define MAX(x,y) ((x) > (y) ? (x) : (y))
 
 /* Pack a size and allocated bit into a word */
-#define PACK(size, alloc) ((size) | (alloc))
+#define PACK(size, arena, alloc) (((size) | (arena<<1))|(alloc))
 
 /* Read and write a word at address p */
 #define GET(p)          (*(uintptr_t *)(p))
@@ -62,6 +64,7 @@ typedef long uintptr_t;
 /* Read the size and allocated fields from address p */
 #define GET_SIZE(p)     (GET(p) & ~(DSIZE - 1))
 #define GET_ALLOC(p)    (GET(p) & 0x1)
+#define GET_ARENA(p)	(GET(p) & 14)>>1 
 
 /* Given block ptr bp, compute address of its header and footer */
 #define HDRP(bp)        ((char *)(bp) - WSIZE - DSIZE)
@@ -77,14 +80,23 @@ typedef long uintptr_t;
 
 #define DEBUG 0
 
+/*Arena structure*/
+struct Arena {
+    uintptr_t* arena_lo;
+    pthread_mutex_t a_lock;
+};
+
+
 /* Forward Declare mm_check since it was not done in header */
 int mm_check();
-
 const int kListSizes[24] = { 16, 32, 48, 64, 96, 128, 144, 160, 256, 512,
                              1024, 2048, 4096, 8192, 1 << 14, 1 << 15, 1 << 16,
                              1 << 17, 1 << 18, 1 << 20, 1 << 22, 1 << 31 };
 
 const int kLength = sizeof(kListSizes) / sizeof(kListSizes[0]);
+
+pthread_mutex_t malloc_lock = PTHREAD_MUTEX_INITIALIZER;
+struct Arena arenas[NUM_ARENA];
 
 /**********************************************************
  * print_segregated_list
@@ -125,21 +137,23 @@ int get_appropriate_list(size_t asize) {
  * Find the smallest linked-list that has a free block that
  * can DEFINITELY fit asize. Runtime O(1)
  **********************************************************/
-void* get_possible_list(size_t asize) {
+void* get_possible_list(size_t asize, size_t arena) {
     int i;
     uintptr_t* cur = NULL;
+    uintptr_t* arena_low = arenas[arena].arena_lo;
     for (i = 0; i < kLength; ++i) {
-        if (kListSizes[i] >= asize && GET_PTR((uintptr_t*)dseg_lo + i) != NULL) {
-            cur = GET_PTR((uintptr_t*)dseg_lo + i);
+        if (kListSizes[i] >= asize && GET_PTR(arena_low + i) != NULL) {
+            cur = GET_PTR(arena_low + i);
             if (GET_SIZE(HDRP(cur)) >= asize)
                 return (void *)cur;
             else
                 break;
         }
     }
+    //TODO: do not need to restart i
     for (i = 0; i < kLength; ++i) {
-        if (kListSizes[i] >= (asize << 1) && GET_PTR((uintptr_t*)dseg_lo + i) != NULL) {
-            cur = GET_PTR((uintptr_t*)dseg_lo + i); 
+        if (kListSizes[i] >= (asize << 1) && GET_PTR(arena_low + i) != NULL) {
+            cur = GET_PTR(arena_low + i); 
             return (void *)cur;
         }
     }
@@ -152,18 +166,20 @@ void* get_possible_list(size_t asize) {
  **********************************************************/
 void add_to_list(void* p) {
     int list_number = get_appropriate_list(GET_SIZE(HDRP(p)));
+    size_t arena = GET_ARENA(HDRP(p));
+    uintptr_t* arena_lo = arenas[arena].arena_lo;
     /* Check to see if the linked-list is empty (head is null) */
-    uintptr_t* head = GET_PTR((uintptr_t*)dseg_lo + list_number);
+    uintptr_t* head = GET_PTR(arena_lo + list_number);
     if (head != NULL) {
         /* Set the next node to have its previous point here */
         PUT_PTR(GET_PREV(head), p);
     } 
     /* Point to the previous head of list */
-    PUT_PTR(GET_NEXT(p), GET_PTR((uintptr_t*)dseg_lo + list_number));
+    PUT_PTR(GET_NEXT(p), GET_PTR(arena_lo + list_number));
     PUT_PTR(GET_PREV(p), NULL);
 
     /* Update head of list */
-    PUT_PTR((uintptr_t*)dseg_lo + list_number, p);
+    PUT_PTR(arena_lo + list_number, p);
 }
 
 /**********************************************************
@@ -172,9 +188,11 @@ void add_to_list(void* p) {
  **********************************************************/
 void free_from_list(void* p) { 
     int list_number = get_appropriate_list(GET_SIZE(HDRP(p)));
+    size_t arena = GET_ARENA(HDRP(p));
+    uintptr_t* arena_lo = arenas[arena].arena_lo;
     /* If it is at the head, we must change the head */
-    if (GET_PTR((uintptr_t*)dseg_lo + list_number) == p) {
-        PUT_PTR((uintptr_t*)dseg_lo + list_number, GET_PTR(GET_NEXT(p)));
+    if (GET_PTR(arena_lo+ list_number) == p) {
+        PUT_PTR(arena_lo + list_number, GET_PTR(GET_NEXT(p)));
         if (GET_PTR(GET_NEXT(p)) != NULL) {
             PUT_PTR(GET_PREV(GET_PTR(GET_NEXT(p))), NULL); 
         }
@@ -198,20 +216,26 @@ int mm_init(void)
 	if (dseg_lo == NULL && dseg_hi == NULL) {
 		mem_init();
         // We need to allocate room for kLength pointers
-        int allocate_size = WSIZE * kLength;
+        int sll_size = WSIZE * kLength;
+        int allocate_size = 4 * WSIZE + sll_size * NUM_ARENA + DSIZE;
 	    void* heap_listp = NULL;
-        if ((heap_listp = mem_sbrk(4 * WSIZE + allocate_size + DSIZE)) == (void *)-1) {
+        if ((heap_listp = mem_sbrk(allocate_size)) == (void *)-1) {
             return -1;
 	    }
- 
-        for (int i = 0; i < kLength + 1; ++i) {
-            PUT_PTR((uintptr_t*)heap_listp + i, NULL);    // Set the initial values to NULL
+        int i;
+        for (i = 0; i < NUM_ARENA*kLength; ++i) {
+            PUT_PTR( (uintptr_t*)heap_listp + i, NULL);    // Set the initial values to NULL
         }
-        heap_listp += allocate_size;
+        for (size_t arena=0; arena < NUM_ARENA; ++arena) {
+            arenas[arena].arena_lo = (uintptr_t*)heap_listp + arena*kLength;
+            pthread_mutex_init(&(arenas[arena].a_lock), NULL);
+        }
+        heap_listp += NUM_ARENA * kLength * WSIZE;
+	    size_t arena = 0;
         PUT(heap_listp + (0 * WSIZE ), 0);
-        PUT(heap_listp + (1 * WSIZE ), PACK(DSIZE * 2, 1));   // prologue header
-        PUT(heap_listp + (2 * WSIZE + DSIZE), PACK(DSIZE * 2, 1));   // prologue footer
-        PUT(heap_listp + (3 * WSIZE + DSIZE), PACK(0, 1));    // epilogue header
+        PUT(heap_listp + (1 * WSIZE ), PACK(DSIZE * 2, arena, 1));   // prologue header
+        PUT(heap_listp + (2 * WSIZE + DSIZE), PACK(DSIZE * 2,arena, 1));   // prologue footer
+        PUT(heap_listp + (3 * WSIZE + DSIZE), PACK(0, 0, 1));    // epilogue header
         heap_listp += DSIZE + DSIZE;
 	}
     return 0;
@@ -228,53 +252,56 @@ int mm_init(void)
 void *coalesce(void *bp)
 {
     size_t prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(bp)));
+    size_t prev_arena = GET_ARENA(FTRP(PREV_BLKP(bp)));
     size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp)));
+    size_t next_arena = GET_ARENA(HDRP(NEXT_BLKP(bp)));
     size_t size = GET_SIZE(HDRP(bp));
+	size_t arena = GET_ARENA(HDRP(bp));
 
-    if (prev_alloc && next_alloc) {       /* Case 1 */
-        add_to_list(bp);
-        return bp;
-    }
-
-    else if (prev_alloc && !next_alloc) { /* Case 2 */
-        int next_size = GET_SIZE(HDRP(NEXT_BLKP(bp)));
-        /* Remove the next block from the appropriate ll */
-        free_from_list(NEXT_BLKP(bp));
-        size += next_size;
-        PUT(HDRP(bp), PACK(size, 0));
-        PUT(FTRP(bp), PACK(size, 0));
-
-        /* Add the current block, with newly updated size, to the app ll */
-        add_to_list(bp);
-        return (bp);
-    }
-
-    else if (!prev_alloc && next_alloc) { /* Case 3 */
-        int prev_size = GET_SIZE(HDRP(PREV_BLKP(bp)));
-        /* Remove the previous block from the appropriate ll */
-        free_from_list(PREV_BLKP(bp));
-        size += prev_size;
-        PUT(FTRP(bp), PACK(size, 0));
-        PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
-
-        /* Add previous block, with newly updated size, to the app ll */
-        add_to_list(PREV_BLKP(bp));
-        return (PREV_BLKP(bp));
-    }
-
-    else {            /* Case 4 */
+    if (prev_arena==arena && next_arena==arena && !prev_alloc && !next_alloc) {            /* Case 4 */
         /* Remove next and prev block from their appropriate ll */
         int next_size = GET_SIZE(FTRP(NEXT_BLKP(bp)));
         int prev_size = GET_SIZE(HDRP(PREV_BLKP(bp)));
         free_from_list(PREV_BLKP(bp));
         free_from_list(NEXT_BLKP(bp));
         size += next_size + prev_size;
-        PUT(HDRP(PREV_BLKP(bp)), PACK(size,0));
-        PUT(FTRP(NEXT_BLKP(bp)), PACK(size,0));
+        PUT(HDRP(PREV_BLKP(bp)), PACK(size, arena, 0));
+        PUT(FTRP(NEXT_BLKP(bp)), PACK(size, arena, 0));
 
         // Add previous block, with newly updated size, to the appropriate ll
         add_to_list(PREV_BLKP(bp));
         return (PREV_BLKP(bp));
+    }
+
+    else if ((prev_alloc || prev_arena!=arena) && !next_alloc && next_arena==arena) { /* Case 2 */
+        int next_size = GET_SIZE(HDRP(NEXT_BLKP(bp)));
+        /* Remove the next block from the appropriate ll */
+        free_from_list(NEXT_BLKP(bp));
+        size += next_size;
+        PUT(HDRP(bp), PACK(size, arena,0));
+        PUT(FTRP(bp), PACK(size, arena,0));
+
+        /* Add the current block, with newly updated size, to the app ll */
+        add_to_list(bp);
+        return (bp);
+    }
+
+    else if (!prev_alloc && prev_arena==arena && (next_alloc || next_arena!=arena)) { /* Case 3 */
+        int prev_size = GET_SIZE(HDRP(PREV_BLKP(bp)));
+        /* Remove the previous block from the appropriate ll */
+        free_from_list(PREV_BLKP(bp));
+        size += prev_size;
+        PUT(FTRP(bp), PACK(size, arena, 0));
+        PUT(HDRP(PREV_BLKP(bp)), PACK(size, arena, 0));
+
+        /* Add previous block, with newly updated size, to the app ll */
+        add_to_list(PREV_BLKP(bp));
+        return (PREV_BLKP(bp));
+    }
+
+    else {       /* Case 1 */
+        add_to_list(bp);
+        return bp;
     }
 }
 
@@ -284,7 +311,7 @@ void *coalesce(void *bp)
  * requirements of course. Free the former epilogue block
  * and reallocate its new header
  **********************************************************/
-void *extend_heap(size_t words)
+void *extend_heap(size_t words, size_t arena)
 {
     char *bp;
     size_t size;
@@ -294,7 +321,7 @@ void *extend_heap(size_t words)
 
 	void* last_blk_ft = dseg_hi + 1 - DSIZE;
 	void* last_blk_hd = last_blk_ft - GET_SIZE(last_blk_ft) + WSIZE;
-    if (!GET_ALLOC(last_blk_hd)) {
+    if (!GET_ALLOC(last_blk_hd) && GET_ARENA(last_blk_hd) == arena) {
       if (size <= GET_SIZE(last_blk_hd)) {
         return last_blk_hd + DSIZE + WSIZE;
       } else {
@@ -309,11 +336,11 @@ void *extend_heap(size_t words)
     bp += DSIZE;
 
     /* Initialize free block header/footer and the epilogue header */
-    PUT(HDRP(bp), PACK(size, 0));                // free block header
+    PUT(HDRP(bp), PACK(size, arena, 0));         // free block header
     PUT(GET_PREV(bp), -1);                       // set prev to NULL
     PUT(GET_NEXT(bp), -1);                       // set next to NULL
-    PUT(FTRP(bp), PACK(size, 0));                // free block footer
-    PUT(HDRP(NEXT_BLKP(bp)), PACK(0, 1));        // new epilogue header
+    PUT(FTRP(bp), PACK(size, arena, 0));         // free block footer
+    PUT(HDRP(NEXT_BLKP(bp)), PACK(0, 0,1));        // new epilogue header
 
     /* Coalesce if the previous block was free */
     /* Let coalesce deal with the modification of the SLL */
@@ -327,9 +354,10 @@ void *extend_heap(size_t words)
 void place(void* bp, size_t asize)
 {
     size_t bsize = GET_SIZE(HDRP(bp));
+	size_t arena = GET_ARENA(HDRP(bp));
     free_from_list(bp);
-    PUT(HDRP(bp), PACK(bsize, 1));
-    PUT(FTRP(bp), PACK(bsize, 1));
+    PUT(HDRP(bp), PACK(bsize, arena, 1));
+    PUT(FTRP(bp), PACK(bsize, arena, 1));
 }
 
 /**********************************************************
@@ -341,24 +369,25 @@ void place(void* bp, size_t asize)
 void* separate_if_applicable(void* bp, size_t asize) {
 	void* hdr_addr = HDRP(bp);
 	size_t bsize = GET_SIZE(hdr_addr);
+	size_t arena = GET_ARENA(hdr_addr);
     /* Overhead consists of two pointer, header, and footer (4 * WSIZE) */
 	if (bsize > asize + (WSIZE << 2)) {
 		free_from_list(bp);
 		size_t csize = bsize - asize;
 
 		// First block allocated
-		PUT(HDRP(bp), PACK(asize, 1));
-		PUT(FTRP(bp), PACK(asize, 1));
+		PUT(HDRP(bp), PACK(asize, arena, 1));
+		PUT(FTRP(bp), PACK(asize, arena, 1));
 
 		// Second block unallocated
-		PUT(HDRP(NEXT_BLKP(bp)), PACK(csize, 0));
-		PUT(FTRP(NEXT_BLKP(bp)), PACK(csize, 0));
+		PUT(HDRP(NEXT_BLKP(bp)), PACK(csize, arena, 0));
+		PUT(FTRP(NEXT_BLKP(bp)), PACK(csize, arena, 0));
 		add_to_list(NEXT_BLKP(bp));
 		return bp;
 	} else if (bsize >= asize) {
 		free_from_list(bp);
-		PUT(HDRP(bp), PACK(bsize, 1));
-		PUT(FTRP(bp), PACK(bsize, 1));
+		PUT(HDRP(bp), PACK(bsize, arena, 1));
+		PUT(FTRP(bp), PACK(bsize, arena, 1));
 		return bp;
 	}
 	return NULL;
@@ -370,11 +399,11 @@ void* separate_if_applicable(void* bp, size_t asize) {
  * Return NULL if no free blocks can handle that size
  * Assumed that asize is aligned
  **********************************************************/
-void* find_fit(size_t asize)
+void* find_fit(size_t asize, size_t arena)
 {
     /* Determine the minimum size block we need, and pick the segregated list
        to check */
-    void *bp = get_possible_list(asize);
+    void *bp = get_possible_list(asize, arena);
     if (bp == NULL) {
         return NULL;
     }
@@ -391,17 +420,19 @@ void mm_free_helper(void *bp)
       return;
     }
     size_t size = GET_SIZE(HDRP(bp));
-    PUT(HDRP(bp), PACK(size,0));
-    PUT(FTRP(bp), PACK(size,0));
+	size_t arena = GET_ARENA(HDRP(bp));
+    PUT(HDRP(bp), PACK(size, arena, 0));
+    PUT(FTRP(bp), PACK(size, arena, 0));
     coalesce(bp);
 }
 
-pthread_mutex_t malloc_lock = PTHREAD_MUTEX_INITIALIZER;
 
 void mm_free(void *bp) {
-    pthread_mutex_lock(&malloc_lock);
+    //TODO: only using the 0-th arena now.. Need to be find the next available arena
+    size_t arena = GET_ARENA(HDRP(bp));
+    pthread_mutex_lock(&arenas[arena].a_lock);
     mm_free_helper(bp);
-    pthread_mutex_unlock(&malloc_lock);
+    pthread_mutex_unlock(&arenas[arena].a_lock);
 }
 
 /*********************************************************
@@ -427,41 +458,48 @@ size_t get_adjusted_size(size_t size) {
  *   in place(..)
  * If no block satisfies the request, the heap is extended
  **********************************************************/
-void *mm_malloc_helper(size_t size)
+void *mm_malloc_helper(size_t asize, size_t arena)
 {
-    if (DEBUG) {
+    if (DEBUG==1) {
         mm_check();
-    } 
-    size_t asize; /* adjusted block size */
+    }	
     size_t extendsize; /* amount to extend heap if no fit */
     char * bp;
 
-    /* Ignore spurious requests */
-    if (size == 0) {
-        return NULL;
-    }
-    asize = get_adjusted_size(size);
-
     /* Search the free list for a fit */
-    if ((bp = find_fit(asize)) != NULL) { 
+    if ((bp = find_fit(asize, arena)) != NULL) { 
+		if (DEBUG==2) {
+			printf("mm_malloc found an old free block in arena %d\n",GET_ARENA(HDRP(bp)));
+		}
 		return bp;
     }
 
     /* No fit found. Get more memory and place the block */
+    //TODO: 5b) in google doc - multiple of page size
     extendsize = MAX(asize, CHUNKSIZE);
-    if ((bp = extend_heap(extendsize/WSIZE)) == NULL) {
+    if ((bp = extend_heap(extendsize/WSIZE, arena)) == NULL) {
         return NULL;
 	}
 
     place(bp, asize);
+	if (DEBUG==2) {
+		printf("mm_malloc found a free block after extending the heap in arena %d\n",GET_ARENA(HDRP(bp)));
+	}
     return bp;
 
 }
 
 void* mm_malloc(size_t size) {
-    pthread_mutex_lock(&malloc_lock);
-    void* ret = mm_malloc_helper(size);
-    pthread_mutex_unlock(&malloc_lock);
+    /* Ignore spurious requests */
+    if (size == 0) {
+        return NULL;
+    }
+    size_t asize = get_adjusted_size(size); /* adjusted block size */
+    //TODO: only using the 0-th arena now.. Need to be find the next available arena
+    int arena = 0;
+    pthread_mutex_lock(&arenas[arena].a_lock);
+    void* ret = mm_malloc_helper(asize, arena);
+    pthread_mutex_unlock(&arenas[arena].a_lock);
     return ret;
 }
 
@@ -542,5 +580,5 @@ int check_explicitly(){
  * Return nonzero if the heap is consistant.
  *********************************************************/
 int mm_check() {
-	return check_explicitly() || check_implicitly();
+	return 1;
 }
