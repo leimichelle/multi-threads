@@ -32,10 +32,14 @@ name_t myname = {
     "Lei, Mei Siu",
     /* First member's email address */
     "michelle.lei@mail.utoronto.ca",
+    /* Student Number of first team member */
+    "1000302718",
     /* Second member's full name (leave blank if none) */
     "Haoen Huang",
     /* Second member's email address (leave blank if none) */
-    "haoen.huang@mail.utoronto.ca"
+    "haoen.huang@mail.utoronto.ca",
+    /* Student Number of second team member */
+    "1000738570"
 };
 
 /*************************************************************************
@@ -85,7 +89,6 @@ struct Arena {
     uintptr_t* arena_lo;
     pthread_mutex_t a_lock;
 };
-
 
 /* Forward Declare mm_check since it was not done in header */
 int mm_check();
@@ -310,7 +313,7 @@ void *extend_heap(size_t words, size_t arena) {
     /* Allocate an even number of words to maintain alignments */
     size = (words % 2) ? (words+1) * WSIZE : words * WSIZE;
 
-    //pthread_mutex_lock(&heap_lock);
+    pthread_mutex_lock(&heap_lock);
 	void* last_blk_ft = dseg_hi + 1 - DSIZE;
 	void* last_blk_hd = last_blk_ft - GET_SIZE(last_blk_ft) + WSIZE;
     if (!GET_ALLOC(last_blk_hd) && GET_ARENA(last_blk_hd) == arena) {
@@ -337,7 +340,7 @@ void *extend_heap(size_t words, size_t arena) {
     /* Coalesce if the previous block was free */
     /* Let coalesce deal with the modification of the SLL */
     bp = coalesce(bp);
-    //pthread_mutex_unlock(&heap_lock);
+    pthread_mutex_unlock(&heap_lock);
     return bp;
 }
 
@@ -498,19 +501,20 @@ void* mm_malloc(size_t size) {
     }
     size_t asize = get_adjusted_size(size); /* adjusted block size */
     //TODO: only using the 0-th arena now.. Need to be find the next available arena
-    int arena = 0;
+    /*int arena = 0;
     pthread_mutex_lock(&arenas[arena].a_lock);
     void* ret = mm_malloc_helper(asize, arena);
-    pthread_mutex_unlock(&arenas[arena].a_lock);
-    /*while(true) {
+    pthread_mutex_unlock(&arenas[arena].a_lock);*/
+    void* ret;
+    while(1) {
         for (int arena=0; arena < NUM_ARENA; arena++) {
-            if (pthread_mutex_trylock(&arenas[arena].a_lock)) {
-                void* ret = mm_malloc_helper(asize, arena);
+            if (pthread_mutex_trylock(&arenas[arena].a_lock)==0) {
+                ret = mm_malloc_helper(asize, arena);
                 pthread_mutex_unlock(&arenas[arena].a_lock);
                 return ret;
             }
         }
-    }*/
+    }
     return ret;
 }
 
