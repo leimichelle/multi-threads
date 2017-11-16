@@ -95,7 +95,7 @@ const int kListSizes[24] = { 16, 32, 48, 64, 96, 128, 144, 160, 256, 512,
 
 const int kLength = sizeof(kListSizes) / sizeof(kListSizes[0]);
 
-pthread_mutex_t malloc_lock = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t heap_lock = PTHREAD_MUTEX_INITIALIZER;
 struct Arena arenas[NUM_ARENA];
 
 /**********************************************************
@@ -211,8 +211,7 @@ void free_from_list(void* p) {
  * Initialize the heap, including "allocation" of the
  * prologue and epilogue
  **********************************************************/
-int mm_init(void)
-{
+int mm_init(void) {
 	if (dseg_lo == NULL && dseg_hi == NULL) {
 		mem_init();
         // We need to allocate room for kLength pointers
@@ -249,8 +248,7 @@ int mm_init(void)
  * - the previous block is available for coalescing
  * - both neighbours are available for coalescing
  **********************************************************/
-void *coalesce(void *bp)
-{
+void *coalesce(void *bp) {
     size_t prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(bp)));
     size_t prev_arena = GET_ARENA(FTRP(PREV_BLKP(bp)));
     size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp)));
@@ -271,9 +269,7 @@ void *coalesce(void *bp)
         // Add previous block, with newly updated size, to the appropriate ll
         add_to_list(PREV_BLKP(bp));
         return (PREV_BLKP(bp));
-    }
-
-    else if ((prev_alloc || prev_arena!=arena) && !next_alloc && next_arena==arena) { /* Case 2 */
+    } else if ((prev_alloc || prev_arena!=arena) && !next_alloc && next_arena==arena) { /* Case 2 */
         int next_size = GET_SIZE(HDRP(NEXT_BLKP(bp)));
         /* Remove the next block from the appropriate ll */
         free_from_list(NEXT_BLKP(bp));
@@ -284,9 +280,7 @@ void *coalesce(void *bp)
         /* Add the current block, with newly updated size, to the app ll */
         add_to_list(bp);
         return (bp);
-    }
-
-    else if (!prev_alloc && prev_arena==arena && (next_alloc || next_arena!=arena)) { /* Case 3 */
+    } else if (!prev_alloc && prev_arena==arena && (next_alloc || next_arena!=arena)) { /* Case 3 */
         int prev_size = GET_SIZE(HDRP(PREV_BLKP(bp)));
         /* Remove the previous block from the appropriate ll */
         free_from_list(PREV_BLKP(bp));
@@ -297,9 +291,7 @@ void *coalesce(void *bp)
         /* Add previous block, with newly updated size, to the app ll */
         add_to_list(PREV_BLKP(bp));
         return (PREV_BLKP(bp));
-    }
-
-    else {       /* Case 1 */
+    } else {       /* Case 1 */
         add_to_list(bp);
         return bp;
     }
@@ -311,14 +303,14 @@ void *coalesce(void *bp)
  * requirements of course. Free the former epilogue block
  * and reallocate its new header
  **********************************************************/
-void *extend_heap(size_t words, size_t arena)
-{
+void *extend_heap(size_t words, size_t arena) {
     char *bp;
     size_t size;
 
     /* Allocate an even number of words to maintain alignments */
     size = (words % 2) ? (words+1) * WSIZE : words * WSIZE;
 
+    //pthread_mutex_lock(&heap_lock);
 	void* last_blk_ft = dseg_hi + 1 - DSIZE;
 	void* last_blk_hd = last_blk_ft - GET_SIZE(last_blk_ft) + WSIZE;
     if (!GET_ALLOC(last_blk_hd) && GET_ARENA(last_blk_hd) == arena) {
@@ -344,15 +336,16 @@ void *extend_heap(size_t words, size_t arena)
 
     /* Coalesce if the previous block was free */
     /* Let coalesce deal with the modification of the SLL */
-    return coalesce(bp);
+    bp = coalesce(bp);
+    //pthread_mutex_unlock(&heap_lock);
+    return bp;
 }
 
 /**********************************************************
  * place
  * Mark the block as allocated
  **********************************************************/
-void place(void* bp, size_t asize)
-{
+void place(void* bp, size_t asize) {
     size_t bsize = GET_SIZE(HDRP(bp));
 	size_t arena = GET_ARENA(HDRP(bp));
     free_from_list(bp);
@@ -399,8 +392,7 @@ void* separate_if_applicable(void* bp, size_t asize) {
  * Return NULL if no free blocks can handle that size
  * Assumed that asize is aligned
  **********************************************************/
-void* find_fit(size_t asize, size_t arena)
-{
+void* find_fit(size_t asize, size_t arena) {
     /* Determine the minimum size block we need, and pick the segregated list
        to check */
     void *bp = get_possible_list(asize, arena);
@@ -414,8 +406,7 @@ void* find_fit(size_t asize, size_t arena)
  * mm_free
  * Free the block and coalesce with neighbouring blocks
  **********************************************************/
-void mm_free_helper(void *bp)
-{
+void mm_free_helper(void *bp) {
     if (bp == NULL){
       return;
     }
@@ -428,7 +419,6 @@ void mm_free_helper(void *bp)
 
 
 void mm_free(void *bp) {
-    //TODO: only using the 0-th arena now.. Need to be find the next available arena
     size_t arena = GET_ARENA(HDRP(bp));
     pthread_mutex_lock(&arenas[arena].a_lock);
     mm_free_helper(bp);
@@ -449,6 +439,20 @@ size_t get_adjusted_size(size_t size) {
     asize += DSIZE;
     return asize;
 }
+/*********************************************************
+ * get_num_pages_2_extend 
+ * calculate the number of pages for which we want to 
+ * extend our heap
+ *********************************************************/
+size_t get_num_pages_2_extend(size_t asize) {
+    size_t num_page;
+    if (asize <= PAGE_SIZE) {
+        num_page = 1;
+    } else {
+        num_page = (asize + PAGE_SIZE-1) / PAGE_SIZE;
+    }
+    return num_page;
+}
 
 /**********************************************************
  * mm_malloc
@@ -458,8 +462,7 @@ size_t get_adjusted_size(size_t size) {
  *   in place(..)
  * If no block satisfies the request, the heap is extended
  **********************************************************/
-void *mm_malloc_helper(size_t asize, size_t arena)
-{
+void *mm_malloc_helper(size_t asize, size_t arena) {
     if (DEBUG==1) {
         mm_check();
     }	
@@ -475,13 +478,12 @@ void *mm_malloc_helper(size_t asize, size_t arena)
     }
 
     /* No fit found. Get more memory and place the block */
-    //TODO: 5b) in google doc - multiple of page size
-    extendsize = MAX(asize, CHUNKSIZE);
+    extendsize = PAGE_SIZE * get_num_pages_2_extend(asize);
     if ((bp = extend_heap(extendsize/WSIZE, arena)) == NULL) {
         return NULL;
 	}
 
-    place(bp, asize);
+    separate_if_applicable(bp, asize);
 	if (DEBUG==2) {
 		printf("mm_malloc found a free block after extending the heap in arena %d\n",GET_ARENA(HDRP(bp)));
 	}
@@ -500,6 +502,15 @@ void* mm_malloc(size_t size) {
     pthread_mutex_lock(&arenas[arena].a_lock);
     void* ret = mm_malloc_helper(asize, arena);
     pthread_mutex_unlock(&arenas[arena].a_lock);
+    /*while(true) {
+        for (int arena=0; arena < NUM_ARENA; arena++) {
+            if (pthread_mutex_trylock(&arenas[arena].a_lock)) {
+                void* ret = mm_malloc_helper(asize, arena);
+                pthread_mutex_unlock(&arenas[arena].a_lock);
+                return ret;
+            }
+        }
+    }*/
     return ret;
 }
 
