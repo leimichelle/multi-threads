@@ -27,7 +27,7 @@
 #include "malloc.h"
 name_t myname = {
     /* Team name */
-    "Charlie and Michelle",
+    "uintptr_t",
     /* First member's full name */
     "Lei, Mei Siu",
     /* First member's email address */
@@ -51,13 +51,13 @@ typedef long uintptr_t;
 #define WSIZE       sizeof(void *)            /* word size (bytes) */
 #define DSIZE       (2 * WSIZE)            /* doubleword size (bytes) */
 #define CHUNKSIZE   (1 << 6)      /* initial heap size (bytes) */
-#define NUM_ARENA 8
-#define PAGE_SIZE 1<<20
+#define NUM_ARENA 9
+#define PAGE_SIZE (1<<10)
 
 #define MAX(x,y) ((x) > (y) ? (x) : (y))
 
 /* Pack a size and allocated bit into a word */
-#define PACK(size, arena, alloc) (((size) | (arena<<1))|(alloc))
+#define PACK(size, arena, alloc) (((size<<1) | (arena<<1))|(alloc))
 
 /* Read and write a word at address p */
 #define GET(p)          (*(uintptr_t *)(p))
@@ -66,9 +66,9 @@ typedef long uintptr_t;
 #define PUT_PTR(p,ptr)  (*(uintptr_t **)(p) = (ptr))
 
 /* Read the size and allocated fields from address p */
-#define GET_SIZE(p)     (GET(p) & ~(DSIZE - 1))
+#define GET_SIZE(p)     ((GET(p)>>1) & ~(DSIZE-1))
 #define GET_ALLOC(p)    (GET(p) & 0x1)
-#define GET_ARENA(p)	(GET(p) & 14)>>1 
+#define GET_ARENA(p)	(GET(p) & 30)>>1 
 
 /* Given block ptr bp, compute address of its header and footer */
 #define HDRP(bp)        ((char *)(bp) - WSIZE - DSIZE)
@@ -86,6 +86,7 @@ typedef long uintptr_t;
 
 /*Arena structure*/
 struct Arena {
+    int TID;
     uintptr_t* arena_lo;
     pthread_mutex_t a_lock;
 };
@@ -99,6 +100,7 @@ const int kListSizes[24] = { 16, 32, 48, 64, 96, 128, 144, 160, 256, 512,
 const int kLength = sizeof(kListSizes) / sizeof(kListSizes[0]);
 
 pthread_mutex_t heap_lock = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t TID_lock = PTHREAD_MUTEX_INITIALIZER;
 struct Arena arenas[NUM_ARENA];
 
 /**********************************************************
@@ -229,6 +231,7 @@ int mm_init(void) {
             PUT_PTR( (uintptr_t*)heap_listp + i, NULL);    // Set the initial values to NULL
         }
         for (size_t arena=0; arena < NUM_ARENA; ++arena) {
+            arenas[arena].TID = -1;
             arenas[arena].arena_lo = (uintptr_t*)heap_listp + arena*kLength;
             pthread_mutex_init(&(arenas[arena].a_lock), NULL);
         }
@@ -332,6 +335,7 @@ void *extend_heap(size_t words, size_t arena) {
 
     /* Initialize free block header/footer and the epilogue header */
     PUT(HDRP(bp), PACK(size, arena, 0));         // free block header
+    size_t a = GET_ARENA(HDRP(bp));
     PUT(GET_PREV(bp), -1);                       // set prev to NULL
     PUT(GET_NEXT(bp), -1);                       // set next to NULL
     PUT(FTRP(bp), PACK(size, arena, 0));         // free block footer
@@ -340,6 +344,7 @@ void *extend_heap(size_t words, size_t arena) {
     /* Coalesce if the previous block was free */
     /* Let coalesce deal with the modification of the SLL */
     bp = coalesce(bp);
+    //TODO: probably can move up before coalesce
     pthread_mutex_unlock(&heap_lock);
     return bp;
 }
@@ -496,22 +501,50 @@ void *mm_malloc_helper(size_t asize, size_t arena) {
 
 void* mm_malloc(size_t size) {
     /* Ignore spurious requests */
-    if (size == 0) {
+    /*if (size == 0) {
         return NULL;
-    }
-    size_t asize = get_adjusted_size(size); /* adjusted block size */
-    //TODO: only using the 0-th arena now.. Need to be find the next available arena
-    /*int arena = 0;
-    pthread_mutex_lock(&arenas[arena].a_lock);
-    void* ret = mm_malloc_helper(asize, arena);
-    pthread_mutex_unlock(&arenas[arena].a_lock);*/
-    void* ret;
+    }*/
+    //size_t asize = get_adjusted_size(size); /* adjusted block size */
+    /*void* ret;
     while(1) {
         for (int arena=0; arena < NUM_ARENA; arena++) {
             if (pthread_mutex_trylock(&arenas[arena].a_lock)==0) {
                 ret = mm_malloc_helper(asize, arena);
                 pthread_mutex_unlock(&arenas[arena].a_lock);
                 return ret;
+            }
+        }
+    }
+    return ret;*/
+    /* Ignore spurious requests */
+    if (size == 0) {
+        return NULL;
+    }
+    size_t asize = get_adjusted_size(size); /* adjusted block size */
+    void* ret;
+    int TID = getTID();
+    while(1) {
+        for (int arena=0; arena < NUM_ARENA; arena++) {
+            if (arenas[arena].TID == TID) {
+                pthread_mutex_lock(&arenas[arena].a_lock);
+                ret = mm_malloc_helper(asize, arena);
+                pthread_mutex_unlock(&arenas[arena].a_lock);
+                return ret;
+            }
+            else if (arenas[arena].TID==-1){
+                int set_new_arena = 0;
+                pthread_mutex_lock(&TID_lock);
+                if (arenas[arena].TID==-1) {
+                    arenas[arena].TID = TID;
+                    set_new_arena = 1;
+                }
+                pthread_mutex_unlock(&TID_lock);
+                if (set_new_arena) {
+                    pthread_mutex_lock(&arenas[arena].a_lock);
+                    ret = mm_malloc_helper(asize, arena);
+                    pthread_mutex_unlock(&arenas[arena].a_lock);
+                    return ret;
+                }
             }
         }
     }
