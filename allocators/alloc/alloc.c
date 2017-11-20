@@ -22,24 +22,26 @@
 #include <unistd.h>
 #include <assert.h>
 #include <pthread.h>
+#include <sched.h>
 
 #include "memlib.h"
 #include "malloc.h"
+
 name_t myname = {
-    /* Team name */
-    "uintptr_t",
-    /* First member's full name */
-    "Lei, Mei Siu",
-    /* First member's email address */
-    "michelle.lei@mail.utoronto.ca",
-    /* Student Number of first team member */
-    "1000302718",
-    /* Second member's full name (leave blank if none) */
-    "Haoen Huang",
-    /* Second member's email address (leave blank if none) */
-    "haoen.huang@mail.utoronto.ca",
-    /* Student Number of second team member */
-    "1000738570"
+     /* team name to be displayed on webpage */
+     "uintptr_t",
+     /* Full name of first team member */
+     "Lei, Mei Siu",
+     /* Email address of first team member */
+     "michelle.lei@mail.utoronto.ca",
+     /* Student Number of first team member */
+     "1000302718",
+     /* Full name of second team member */
+     "Haoen Huang",
+     /* Email address of second team member */
+     "haoen.huang@mail.utoronto.ca",
+     /* Student Number of second team member */
+     "1000738570"
 };
 
 /*************************************************************************
@@ -501,11 +503,13 @@ void *mm_malloc_helper(size_t asize, size_t arena) {
 
 void* mm_malloc(size_t size) {
     /* Ignore spurious requests */
-    /*if (size == 0) {
+    if (size == 0) {
         return NULL;
-    }*/
+    }
     //size_t asize = get_adjusted_size(size); /* adjusted block size */
-    /*void* ret;
+    /*
+    void* ret;
+    printf("%d ", sched_getcpu());
     while(1) {
         for (int arena=0; arena < NUM_ARENA; arena++) {
             if (pthread_mutex_trylock(&arenas[arena].a_lock)==0) {
@@ -515,14 +519,16 @@ void* mm_malloc(size_t size) {
             }
         }
     }
-    return ret;*/
+    return ret;
     /* Ignore spurious requests */
     if (size == 0) {
         return NULL;
     }
+
     size_t asize = get_adjusted_size(size); /* adjusted block size */
+    
     void* ret;
-    int TID = getTID();
+    int TID = sched_getcpu();
     while(1) {
         for (int arena=0; arena < NUM_ARENA; arena++) {
             if (arenas[arena].TID == TID) {
@@ -531,7 +537,7 @@ void* mm_malloc(size_t size) {
                 pthread_mutex_unlock(&arenas[arena].a_lock);
                 return ret;
             }
-            else if (arenas[arena].TID==-1){
+            else if (arenas[arena].TID == -1){
                 int set_new_arena = 0;
                 pthread_mutex_lock(&TID_lock);
                 if (arenas[arena].TID==-1) {
@@ -549,6 +555,7 @@ void* mm_malloc(size_t size) {
         }
     }
     return ret;
+    
 }
 
 /**********************************************************
