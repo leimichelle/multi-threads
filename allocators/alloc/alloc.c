@@ -53,7 +53,7 @@ typedef long uintptr_t;
 #define WSIZE       sizeof(void *)            /* word size (bytes) */
 #define DSIZE       (2 * WSIZE)            /* doubleword size (bytes) */
 #define CHUNKSIZE   (1 << 6)      /* initial heap size (bytes) */
-#define NUM_ARENA 9
+#define NUM_ARENA 16
 #define PAGE_SIZE (1<<10)
 
 #define MAX(x,y) ((x) > (y) ? (x) : (y))
@@ -145,6 +145,11 @@ int get_appropriate_list(size_t asize) {
  * can DEFINITELY fit asize. Runtime O(1)
  **********************************************************/
 void* get_possible_list(size_t asize, size_t arena) {
+    int i2 = 1;
+    int *i2p = &i2;
+    //for (int j = 0; j < 1000000000; j += 2) {
+    //    *i2p += 1;
+    //}
     int i;
     uintptr_t* cur = NULL;
     uintptr_t* arena_low = arenas[arena].arena_lo;
@@ -472,10 +477,11 @@ size_t get_num_pages_2_extend(size_t asize) {
  *   in place(..)
  * If no block satisfies the request, the heap is extended
  **********************************************************/
-void *mm_malloc_helper(size_t asize, size_t arena) {
+void *mm_malloc_helper(size_t ori_size, size_t arena) {
     if (DEBUG==1) {
         mm_check();
     }	
+    size_t asize = get_adjusted_size(ori_size);
     size_t extendsize; /* amount to extend heap if no fit */
     char * bp;
 
@@ -520,42 +526,18 @@ void* mm_malloc(size_t size) {
         }
     }
     return ret;
-    /* Ignore spurious requests */
-    if (size == 0) {
-        return NULL;
-    }
+    */   
+  
+ 
 
-    size_t asize = get_adjusted_size(size); /* adjusted block size */
+
+    //size_t asize = get_adjusted_size(size); /* adjusted block size */
     
-    void* ret;
     int TID = sched_getcpu();
-    while(1) {
-        for (int arena=0; arena < NUM_ARENA; arena++) {
-            if (arenas[arena].TID == TID) {
-                pthread_mutex_lock(&arenas[arena].a_lock);
-                ret = mm_malloc_helper(asize, arena);
-                pthread_mutex_unlock(&arenas[arena].a_lock);
-                return ret;
-            }
-            else if (arenas[arena].TID == -1){
-                int set_new_arena = 0;
-                pthread_mutex_lock(&TID_lock);
-                if (arenas[arena].TID==-1) {
-                    arenas[arena].TID = TID;
-                    set_new_arena = 1;
-                }
-                pthread_mutex_unlock(&TID_lock);
-                if (set_new_arena) {
-                    pthread_mutex_lock(&arenas[arena].a_lock);
-                    ret = mm_malloc_helper(asize, arena);
-                    pthread_mutex_unlock(&arenas[arena].a_lock);
-                    return ret;
-                }
-            }
-        }
-    }
-    return ret;
-    
+    pthread_mutex_lock(&arenas[TID].a_lock);
+    void* ret = mm_malloc_helper(size, TID);
+    pthread_mutex_unlock(&arenas[TID].a_lock);
+    return ret; 
 }
 
 /**********************************************************
