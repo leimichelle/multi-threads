@@ -145,11 +145,6 @@ int get_appropriate_list(size_t asize) {
  * can DEFINITELY fit asize. Runtime O(1)
  **********************************************************/
 void* get_possible_list(size_t asize, size_t arena) {
-    int i2 = 1;
-    int *i2p = &i2;
-    //for (int j = 0; j < 1000000000; j += 2) {
-    //    *i2p += 1;
-    //}
     int i;
     uintptr_t* cur = NULL;
     uintptr_t* arena_low = arenas[arena].arena_lo;
@@ -421,22 +416,16 @@ void* find_fit(size_t asize, size_t arena) {
  * mm_free
  * Free the block and coalesce with neighbouring blocks
  **********************************************************/
-void mm_free_helper(void *bp) {
+void mm_free(void *bp) {
     if (bp == NULL){
       return;
     }
     size_t size = GET_SIZE(HDRP(bp));
 	size_t arena = GET_ARENA(HDRP(bp));
+    pthread_mutex_lock(&arenas[arena].a_lock);
     PUT(HDRP(bp), PACK(size, arena, 0));
     PUT(FTRP(bp), PACK(size, arena, 0));
     coalesce(bp);
-}
-
-
-void mm_free(void *bp) {
-    size_t arena = GET_ARENA(HDRP(bp));
-    pthread_mutex_lock(&arenas[arena].a_lock);
-    mm_free_helper(bp);
     pthread_mutex_unlock(&arenas[arena].a_lock);
 }
 
@@ -477,25 +466,30 @@ size_t get_num_pages_2_extend(size_t asize) {
  *   in place(..)
  * If no block satisfies the request, the heap is extended
  **********************************************************/
-void *mm_malloc_helper(size_t ori_size, size_t arena) {
+void *mm_malloc(size_t ori_size) {
+    /* Ignore spurious requests */
+    if (ori_size == 0) {
+        return NULL;
+    }
     if (DEBUG==1) {
         mm_check();
     }	
+    int TID = sched_getcpu();
+    
     size_t asize = get_adjusted_size(ori_size);
     size_t extendsize; /* amount to extend heap if no fit */
     char * bp;
-
+    pthread_mutex_lock(&arenas[TID].a_lock);
     /* Search the free list for a fit */
-    if ((bp = find_fit(asize, arena)) != NULL) { 
-		if (DEBUG==2) {
-			printf("mm_malloc found an old free block in arena %d\n",GET_ARENA(HDRP(bp)));
-		}
+    if ((bp = find_fit(asize, TID)) != NULL) { 
+        pthread_mutex_unlock(&arenas[TID].a_lock);
 		return bp;
     }
 
     /* No fit found. Get more memory and place the block */
     extendsize = PAGE_SIZE * get_num_pages_2_extend(asize);
-    if ((bp = extend_heap(extendsize/WSIZE, arena)) == NULL) {
+    if ((bp = extend_heap(extendsize/WSIZE, TID)) == NULL) {
+        pthread_mutex_unlock(&arenas[TID].a_lock);
         return NULL;
 	}
 
@@ -503,41 +497,9 @@ void *mm_malloc_helper(size_t ori_size, size_t arena) {
 	if (DEBUG==2) {
 		printf("mm_malloc found a free block after extending the heap in arena %d\n",GET_ARENA(HDRP(bp)));
 	}
+    pthread_mutex_unlock(&arenas[TID].a_lock);
     return bp;
 
-}
-
-void* mm_malloc(size_t size) {
-    /* Ignore spurious requests */
-    if (size == 0) {
-        return NULL;
-    }
-    //size_t asize = get_adjusted_size(size); /* adjusted block size */
-    /*
-    void* ret;
-    printf("%d ", sched_getcpu());
-    while(1) {
-        for (int arena=0; arena < NUM_ARENA; arena++) {
-            if (pthread_mutex_trylock(&arenas[arena].a_lock)==0) {
-                ret = mm_malloc_helper(asize, arena);
-                pthread_mutex_unlock(&arenas[arena].a_lock);
-                return ret;
-            }
-        }
-    }
-    return ret;
-    */   
-  
- 
-
-
-    //size_t asize = get_adjusted_size(size); /* adjusted block size */
-    
-    int TID = sched_getcpu();
-    pthread_mutex_lock(&arenas[TID].a_lock);
-    void* ret = mm_malloc_helper(size, TID);
-    pthread_mutex_unlock(&arenas[TID].a_lock);
-    return ret; 
 }
 
 /**********************************************************
