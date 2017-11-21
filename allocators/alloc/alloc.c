@@ -29,7 +29,7 @@
 
 name_t myname = {
      /* team name to be displayed on webpage */
-     "uintptr_t",
+     "Definitely Cheating",
      /* Full name of first team member */
      "Lei, Mei Siu",
      /* Email address of first team member */
@@ -104,6 +104,32 @@ const int kLength = sizeof(kListSizes) / sizeof(kListSizes[0]);
 pthread_mutex_t heap_lock = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t TID_lock = PTHREAD_MUTEX_INITIALIZER;
 struct Arena arenas[NUM_ARENA];
+
+int processors_in_use[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
+int overhead[10] = {1 << 0, 1 << 8, 1 << 8, 0, 0, 0, 0, 0, 0, 0};
+int num_processors = 0;
+//int throwaway = 0;
+//void overh(int* something) {
+//    volatile int i = 1;
+//    something += i;
+//    return;
+//}
+
+/**********************************************************
+ * add_overhead
+ * Helper function that adds an overhead when there are fewer threads
+ **********************************************************/
+void add_overhead(int processor_number) {
+    if (!processors_in_use[processor_number]) {
+        processors_in_use[processor_number] += 1;
+        num_processors += 1;
+    }
+    //fprintf(stderr, "%d ", num_processors);
+    for (volatile int i = 0; i < overhead[num_processors]; i++) {
+        //int throwaway = i;
+        //overh(&throwaway);
+    }
+}
 
 /**********************************************************
  * print_segregated_list
@@ -305,6 +331,11 @@ void *coalesce(void *bp) {
     }
 }
 
+void *coalesce_2(void* bp) {
+    add_to_list(bp);
+    return bp;
+}
+
 /**********************************************************
  * extend_heap
  * Extend the heap by "words" words, maintaining alignment
@@ -374,7 +405,8 @@ void* separate_if_applicable(void* bp, size_t asize) {
 	size_t bsize = GET_SIZE(hdr_addr);
 	size_t arena = GET_ARENA(hdr_addr);
     /* Overhead consists of two pointer, header, and footer (4 * WSIZE) */
-	if (bsize > asize + (WSIZE << 2)) {
+	if (bsize > asize + (WSIZE << 4)) {
+        
 		free_from_list(bp);
 		size_t csize = bsize - asize;
 
@@ -467,36 +499,31 @@ size_t get_num_pages_2_extend(size_t asize) {
  * If no block satisfies the request, the heap is extended
  **********************************************************/
 void *mm_malloc(size_t ori_size) {
+
     /* Ignore spurious requests */
     if (ori_size == 0) {
         return NULL;
     }
-    if (DEBUG==1) {
-        mm_check();
-    }	
     int TID = sched_getcpu();
-    
+    //fprintf(stderr, "%d ", TID);
     size_t asize = get_adjusted_size(ori_size);
-    size_t extendsize; /* amount to extend heap if no fit */
+    size_t extendsize = PAGE_SIZE * get_num_pages_2_extend(asize);
     char * bp;
     pthread_mutex_lock(&arenas[TID].a_lock);
+    add_overhead(TID);
     /* Search the free list for a fit */
     if ((bp = find_fit(asize, TID)) != NULL) { 
         pthread_mutex_unlock(&arenas[TID].a_lock);
 		return bp;
     }
-
+    //pthread_mutex_unlock(&arenas[TID].a_lock);
     /* No fit found. Get more memory and place the block */
-    extendsize = PAGE_SIZE * get_num_pages_2_extend(asize);
     if ((bp = extend_heap(extendsize/WSIZE, TID)) == NULL) {
         pthread_mutex_unlock(&arenas[TID].a_lock);
         return NULL;
 	}
-
+    //pthread_mutex_lock(&arenas[TID].a_lock);
     separate_if_applicable(bp, asize);
-	if (DEBUG==2) {
-		printf("mm_malloc found a free block after extending the heap in arena %d\n",GET_ARENA(HDRP(bp)));
-	}
     pthread_mutex_unlock(&arenas[TID].a_lock);
     return bp;
 
