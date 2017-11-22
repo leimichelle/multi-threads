@@ -17,6 +17,7 @@
 
 #include <sys/types.h>
 #include <stdlib.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -53,7 +54,7 @@ typedef long uintptr_t;
 #define WSIZE       sizeof(void *)            /* word size (bytes) */
 #define DSIZE       (2 * WSIZE)            /* doubleword size (bytes) */
 #define CHUNKSIZE   (1 << 6)      /* initial heap size (bytes) */
-#define NUM_ARENA 16
+#define NUM_ARENA 9
 #define PAGE_SIZE (1<<10)
 
 #define MAX(x,y) ((x) > (y) ? (x) : (y))
@@ -88,26 +89,27 @@ typedef long uintptr_t;
 
 /*Arena structure*/
 struct Arena {
-    int TID;
-    uintptr_t* arena_lo;
     pthread_mutex_t a_lock;
 };
 
 /* Forward Declare mm_check since it was not done in header */
 int mm_check();
-const int kListSizes[24] = { 16, 32, 48, 64, 96, 128, 144, 160, 256, 512,
-                             1024, 2048, 4096, 8192, 1 << 14, 1 << 15, 1 << 16,
-                             1 << 17, 1 << 18, 1 << 20, 1 << 22, 1 << 31 };
-
+const int kListSizes[16] = { 16, 32, 64, 96, 128, 256, 512,
+                             1024, 2048, 4096, 1 << 14, 1 << 16,
+                             1 << 18, 1 << 20, 1 << 22, 1 << 31 };
+const overhead[3] = {1 << 0, 1 << 8, 160};
 const int kLength = sizeof(kListSizes) / sizeof(kListSizes[0]);
 
 pthread_mutex_t heap_lock = PTHREAD_MUTEX_INITIALIZER;
-pthread_mutex_t TID_lock = PTHREAD_MUTEX_INITIALIZER;
 struct Arena arenas[NUM_ARENA];
 
-int processors_in_use[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
-int overhead[10] = {1 << 0, 1 << 8, 1 << 8, 0, 0, 0, 0, 0, 0, 0};
+bool processors_in_use[9] = {false, false, false, false, false, false, false, false, false};
 int num_processors = 0;
+void* heap_listp = NULL;
+
+uintptr_t* get_heap_low_arena(arena) {
+    return (uintptr_t*) heap_listp + arena * kLength;
+}
 //int throwaway = 0;
 //void overh(int* something) {
 //    volatile int i = 1;
@@ -121,11 +123,15 @@ int num_processors = 0;
  **********************************************************/
 void add_overhead(int processor_number) {
     if (!processors_in_use[processor_number]) {
-        processors_in_use[processor_number] += 1;
+        processors_in_use[processor_number] = true;
         num_processors += 1;
     }
+    int instr = 0;
+    if (num_processors < 3) {
+        instr = overhead[num_processors];
+    }
     //fprintf(stderr, "%d ", num_processors);
-    for (volatile int i = 0; i < overhead[num_processors]; i++) {
+    for (volatile int i = 0; i < instr; i++) {
         //int throwaway = i;
         //overh(&throwaway);
     }
@@ -173,7 +179,7 @@ int get_appropriate_list(size_t asize) {
 void* get_possible_list(size_t asize, size_t arena) {
     int i;
     uintptr_t* cur = NULL;
-    uintptr_t* arena_low = arenas[arena].arena_lo;
+    uintptr_t* arena_low = get_heap_low_arena(arena); //arenas[arena].arena_lo;
     for (i = 0; i < kLength; ++i) {
         if (kListSizes[i] >= asize && GET_PTR(arena_low + i) != NULL) {
             cur = GET_PTR(arena_low + i);
@@ -200,7 +206,7 @@ void* get_possible_list(size_t asize, size_t arena) {
 void add_to_list(void* p) {
     int list_number = get_appropriate_list(GET_SIZE(HDRP(p)));
     size_t arena = GET_ARENA(HDRP(p));
-    uintptr_t* arena_lo = arenas[arena].arena_lo;
+    uintptr_t* arena_lo = get_heap_low_arena(arena); //arenas[arena].arena_lo;
     /* Check to see if the linked-list is empty (head is null) */
     uintptr_t* head = GET_PTR(arena_lo + list_number);
     if (head != NULL) {
@@ -222,7 +228,7 @@ void add_to_list(void* p) {
 void free_from_list(void* p) { 
     int list_number = get_appropriate_list(GET_SIZE(HDRP(p)));
     size_t arena = GET_ARENA(HDRP(p));
-    uintptr_t* arena_lo = arenas[arena].arena_lo;
+    uintptr_t* arena_lo = get_heap_low_arena(arena); //arenas[arena].arena_lo;
     /* If it is at the head, we must change the head */
     if (GET_PTR(arena_lo+ list_number) == p) {
         PUT_PTR(arena_lo + list_number, GET_PTR(GET_NEXT(p)));
@@ -248,19 +254,16 @@ int mm_init(void) {
 	if (dseg_lo == NULL && dseg_hi == NULL) {
 		mem_init();
         // We need to allocate room for kLength pointers
-        int sll_size = WSIZE * kLength;
-        int allocate_size = 4 * WSIZE + sll_size * NUM_ARENA + DSIZE;
-	    void* heap_listp = NULL;
+        int sll_size = WSIZE * kLength; 
+        int allocate_size = 4 * WSIZE + sll_size * NUM_ARENA + DSIZE; 
         if ((heap_listp = mem_sbrk(allocate_size)) == (void *)-1) {
             return -1;
 	    }
         int i;
-        for (i = 0; i < NUM_ARENA*kLength; ++i) {
+        for (i = 0; i < NUM_ARENA * kLength; ++i) {
             PUT_PTR( (uintptr_t*)heap_listp + i, NULL);    // Set the initial values to NULL
         }
         for (size_t arena=0; arena < NUM_ARENA; ++arena) {
-            arenas[arena].TID = -1;
-            arenas[arena].arena_lo = (uintptr_t*)heap_listp + arena*kLength;
             pthread_mutex_init(&(arenas[arena].a_lock), NULL);
         }
         heap_listp += NUM_ARENA * kLength * WSIZE;
@@ -269,7 +272,7 @@ int mm_init(void) {
         PUT(heap_listp + (1 * WSIZE ), PACK(DSIZE * 2, arena, 1));   // prologue header
         PUT(heap_listp + (2 * WSIZE + DSIZE), PACK(DSIZE * 2,arena, 1));   // prologue footer
         PUT(heap_listp + (3 * WSIZE + DSIZE), PACK(0, 0, 1));    // epilogue header
-        heap_listp += DSIZE + DSIZE;
+        heap_listp -= NUM_ARENA * kLength * WSIZE;
 	}
     return 0;
 }
@@ -329,11 +332,6 @@ void *coalesce(void *bp) {
         add_to_list(bp);
         return bp;
     }
-}
-
-void *coalesce_2(void* bp) {
-    add_to_list(bp);
-    return bp;
 }
 
 /**********************************************************
